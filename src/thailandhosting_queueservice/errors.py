@@ -20,5 +20,10 @@ class QueueServiceError(Exception):
         self.instance = instance
 
 
+class TokenError(Exception):
+    """The ``token_provider`` failed or gave no token: nothing was sent. Its
+    exception is the ``__cause__``. Not retried."""
+
+
 class NotFoundError(QueueServiceError):
     """The queue does not exist, or the key may not reach it (``queue_not_found``)."""

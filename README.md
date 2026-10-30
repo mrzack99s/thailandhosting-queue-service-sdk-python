@@ -38,6 +38,26 @@ jobs.process(handle, concurrency=8, retry_delay=30)  # runs until stop= (a threa
 Create access keys in the Console (Queue Service → Access keys). Reuse one
 `Client`: it is thread-safe and keeps connections open.
 
+## Using a service account
+
+A program can use a service account's short-lived token instead of an access
+key. Get it with the identity SDK and pass `token_provider` in place of the key:
+
+```python
+from thailandhosting_identity import default_credential
+
+cred = default_credential()
+client = Client(region="th-bkk-1", token_provider=cred.get_token)
+```
+
+The account needs a grant on the queue, set in the Console. Creating,
+changing and deleting queues takes an access key allowed to manage them.
+
+`token_provider` is called before every attempt, so a refreshed token is
+picked up, and from several threads at once. Give a key or a token provider,
+not both. If it fails, nothing is sent or retried: the call raises
+`TokenError`, and `process` stops and raises it.
+
 ## Receiving by hand
 
 ```python

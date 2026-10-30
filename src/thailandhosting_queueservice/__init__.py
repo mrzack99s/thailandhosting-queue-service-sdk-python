@@ -32,7 +32,7 @@ from .client import (
     content_digest,
     sign_request,
 )
-from .errors import NotFoundError, QueueServiceError
+from .errors import NotFoundError, QueueServiceError, TokenError
 
 __version__ = "1.0.0"
 
@@ -49,6 +49,7 @@ __all__ = [
     "QueueInfo",
     "QueueServiceError",
     "QueueStats",
+    "TokenError",
     "content_digest",
     "sign_request",
 ]

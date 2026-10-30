@@ -16,6 +16,7 @@ from thailandhosting_queueservice import (  # noqa: E402
     NotFoundError,
     Outgoing,
     QueueServiceError,
+    TokenError,
     content_digest,
     sign_request,
 )
@@ -84,6 +85,92 @@ class ErrorsTest(unittest.TestCase):
         finally:
             srv.shutdown()
             srv.server_close()
+
+
+class TokenProviderTest(unittest.TestCase):
+    def setUp(self):
+        seen = self.seen = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                seen.append(dict(self.headers))
+                if len(seen) == 1:
+                    self.send_response(503)
+                    self.send_header("Retry-After", "0")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self.answer(b'{"name":"jobs"}')
+
+            def do_POST(self):
+                seen.append(dict(self.headers))
+                seen[-1]["body"] = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                self.answer(b'{"messages":[{"id":"m1","receipt":"r1","body":"hello"}]}')
+
+            def answer(self, body):
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.endpoint = f"http://127.0.0.1:{self.srv.server_port}"
+
+    def tearDown(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+    def test_bearer_on_every_attempt(self):
+        calls = []
+
+        def provider():
+            calls.append(1)
+            return f"tok-{len(calls)}"
+
+        c = Client(endpoint=self.endpoint, token_provider=provider)
+        self.assertEqual(c.get_queue("jobs").name, "jobs")
+        self.assertEqual(len(calls), 2)
+        got = c.queue("jobs").receive(wait=20)
+        self.assertEqual(got[0].body, "hello")
+        self.assertEqual(self.seen[2]["body"]["wait"], 20)
+        self.assertEqual([h["Authorization"] for h in self.seen], ["Bearer tok-1", "Bearer tok-2", "Bearer tok-3"])
+        for h in self.seen:
+            self.assertNotIn("Signature", h)
+            self.assertNotIn("Signature-Input", h)
+
+    def test_failure_sends_nothing_and_stops_a_worker(self):
+        calls = []
+        boom = ConnectionError("boom")
+
+        def provider():
+            calls.append(1)
+            raise boom
+
+        c = Client(endpoint=self.endpoint, token_provider=provider)
+        with self.assertRaises(TokenError) as e:
+            c.get_queue("jobs")
+        self.assertIs(e.exception.__cause__, boom)
+        self.assertEqual(len(calls), 1)
+        # A worker outlives a token outage: it keeps trying until told to stop.
+        before = len(calls)
+        stop = threading.Event()
+        threading.Timer(0.7, stop.set).start()
+        c.queue("jobs").process(lambda m: None, stop=stop)
+        self.assertGreaterEqual(len(calls), before + 2)
+        with self.assertRaises(TokenError):
+            Client(endpoint=self.endpoint, token_provider=lambda: "").get_queue("jobs")
+        self.assertEqual(self.seen, [])
+
+    def test_key_or_provider_not_both(self):
+        provider = lambda: "tok"  # noqa: E731
+        for bad in ({}, {"access_key_id": "k"}, {"access_key_id": "k", "secret_access_key": "s", "token_provider": provider}, {"access_key_id": "k", "token_provider": provider}, {"secret_access_key": "s", "token_provider": provider}):
+            with self.assertRaises(ValueError):
+                Client(**bad)
+        Client(token_provider=provider)
 
 
 @unittest.skipUnless(os.environ.get("TH_QUEUE_TEST_ENDPOINT"), "TH_QUEUE_TEST_ENDPOINT is not set")

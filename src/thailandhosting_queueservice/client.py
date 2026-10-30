@@ -15,7 +15,7 @@ from urllib.parse import quote, urlsplit
 
 import urllib3
 
-from .errors import NotFoundError, QueueServiceError
+from .errors import NotFoundError, QueueServiceError, TokenError
 
 __all__ = ["Client", "Queue", "QueueInfo", "QueueStats", "Message", "DeleteResult", "Outgoing", "DEFAULT_ENDPOINT", "MAX_BATCH", "MAX_WAIT"]
 
@@ -169,6 +169,17 @@ def sign_request(method: str, url: str, key_id: str, secret: str, digest: Option
     return {"Signature-Input": "th=" + params, "Signature": "th=:" + base64.b64encode(mac).decode() + ":"}
 
 
+def _bearer(provider: Callable[[], str]) -> str:
+    """The Authorization value from a token provider; its failure is a TokenError."""
+    try:
+        token = provider()
+    except Exception as e:
+        raise TokenError(f"token_provider failed: {e}") from e
+    if not token or not isinstance(token, str):
+        raise TokenError("token_provider gave no token")
+    return "Bearer " + token
+
+
 def _backoff(n: int) -> float:
     """The pause before retry n: exponential from 0.1 s, capped at 5 s, with jitter."""
     d = min(0.1 * (2 ** min(n, 6)), 5.0)
@@ -176,7 +187,7 @@ def _backoff(n: int) -> float:
 
 
 class Client:
-    """Talks to Queue Service with one access key.
+    """Talks to Queue Service with one access key or service account.
 
     The client is thread-safe and should be reused: it keeps connections
     open. Busy or unreachable answers are retried with backoff.
@@ -184,19 +195,28 @@ class Client:
 
     def __init__(
         self,
-        access_key_id: str,
-        secret_access_key: str,
+        access_key_id: Optional[str] = None,
+        secret_access_key: Optional[str] = None,
         region: Optional[str] = None,
         endpoint: str = DEFAULT_ENDPOINT,
         max_retries: int = 4,
         timeout: float = 60.0,
         user_agent: Optional[str] = None,
+        token_provider: Optional[Callable[[], str]] = None,
     ) -> None:
         """``region`` (e.g. ``th-bkk-1``) is appended to ``endpoint``; without
         one the service finds each queue's region itself. ``timeout`` must be
-        longer than the longest receive wait (20 s)."""
-        if not access_key_id or not secret_access_key:
-            raise ValueError("access_key_id and secret_access_key are required")
+        longer than the longest receive wait (20 s).
+
+        ``token_provider``, instead of an access key, gives a service account's
+        short-lived token, sent as ``Authorization: Bearer`` with no signature.
+        It is called before every attempt, retries included, so it should cache
+        and refresh the token, and be thread-safe."""
+        if token_provider is not None:
+            if access_key_id or secret_access_key:
+                raise ValueError("give an access key or token_provider, not both")
+        elif not access_key_id or not secret_access_key:
+            raise ValueError("access_key_id and secret_access_key, or token_provider, are required")
         u = urlsplit((endpoint or DEFAULT_ENDPOINT).rstrip("/"))
         if u.scheme not in ("http", "https") or not u.netloc:
             raise ValueError(f"invalid endpoint {endpoint!r}")
@@ -206,8 +226,9 @@ class Client:
         if region:
             path += "/" + quote(region, safe="")
         self.base_url = f"{u.scheme}://{u.netloc}{path}/v1"
-        self._key_id = access_key_id
-        self._secret = secret_access_key
+        self._key_id = access_key_id or ""
+        self._secret = secret_access_key or ""
+        self._token_provider = token_provider
         self._retries = max(0, max_retries)
         self._ua = f"thailandhosting-queue-service-sdk-python/{VERSION}" + (f" {user_agent}" if user_agent else "")
         self._http = urllib3.PoolManager(num_pools=4, maxsize=32, retries=False, timeout=urllib3.Timeout(connect=10.0, read=timeout))
@@ -223,7 +244,10 @@ class Client:
                 digest = content_digest(body)
                 headers["Content-Type"] = "application/json"
                 headers["Content-Digest"] = digest
-            headers.update(sign_request(method, url, self._key_id, self._secret, digest))
+            if self._token_provider is not None:
+                headers["Authorization"] = _bearer(self._token_provider)
+            else:
+                headers.update(sign_request(method, url, self._key_id, self._secret, digest))
             try:
                 resp = self._http.request(method, url, body=body, headers=headers, redirect=False)
             except urllib3.exceptions.HTTPError:
