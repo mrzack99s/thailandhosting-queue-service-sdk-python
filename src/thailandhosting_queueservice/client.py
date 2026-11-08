@@ -19,7 +19,7 @@ from .errors import NotFoundError, QueueServiceError, TokenError
 
 __all__ = ["Client", "Queue", "QueueInfo", "QueueStats", "Message", "DeleteResult", "Outgoing", "DEFAULT_ENDPOINT", "MAX_BATCH", "MAX_WAIT"]
 
-VERSION = "1.0.0"
+VERSION = "1.1.1"
 DEFAULT_ENDPOINT = "https://queues.thailandhosting.com"
 MAX_BATCH = 10  # messages per send, receive or delete
 MAX_WAIT = 20  # seconds a receive may wait for a first message
