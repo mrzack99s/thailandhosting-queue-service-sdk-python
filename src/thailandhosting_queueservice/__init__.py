@@ -34,7 +34,7 @@ from .client import (
 )
 from .errors import NotFoundError, QueueServiceError, TokenError
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     "DEFAULT_ENDPOINT",
